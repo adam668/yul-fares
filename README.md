@@ -64,9 +64,13 @@ The email tells you how many days of history sit behind each number, and
 flags anything under a week as thin. It's honest by about day 14 and solid by
 day 30. Let it run for two weeks before you trust it.
 
-`prices.db` is committed back to the repo after every run. That's not tidy,
-but GitHub wipes the runner between jobs and the history is the whole product.
-Delete it and you're back to day one.
+`prices.db` lives on the `data` branch, as a single commit each run
+replaces, because GitHub wipes the runner between jobs and the history is
+the whole product. Rows older than the 60-day baseline window are pruned
+(each route's all-time low is kept), so the file stays around 10 MB and the
+repo doesn't grow. Delete the branch and you're back to day one — and the
+workflow will refuse to run until it exists again. To look at the data
+locally: `git fetch origin data && git show FETCH_HEAD:prices.db > prices.db`.
 
 ## Tuning
 
@@ -104,6 +108,15 @@ refusing, `flights.Blocked` is raised, the run stops early rather than
 hammering, and you get an email with whatever it found first. Lengthen
 `REQUEST_DELAY` and cut `MAX_DEEP_DIVES` before trying anything cleverer.
 
+A broken scraper and a quiet day for fares look identical — no email — so
+the run fails on purpose when it smells breakage: Google blocking it, more
+than 10% of scans erroring, more than half the routes returning nothing,
+or the deals email bouncing. A failed run emails you (via `alert.py`) with
+the reason and a link to the log. One of those is usually Google being
+flaky; two days running means something needs fixing. The workflow also
+re-enables itself every run, so GitHub's 60-days-of-inactivity rule never
+switches the schedule off.
+
 The real fragility is the schema: Google changes its internal format
 occasionally and the library needs a release to catch up. When prices stop
 coming back, bump the `faster-flights` pin in `requirements.txt` first.
@@ -135,6 +148,7 @@ knows or cares where they came from.
 | `store.py` | SQLite, baselines, repeat-alert suppression |
 | `render.py` | The email |
 | `sample.py` | Fake deals for `--preview` |
+| `alert.py` | The "today's run failed" email, sent by the workflow |
 
 ## Things it deliberately doesn't do
 

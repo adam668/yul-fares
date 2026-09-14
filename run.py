@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
 
@@ -46,6 +47,31 @@ def due_today(code: str, today: date | None = None) -> bool:
     return sum(map(ord, code)) % n == today.toordinal() % n
 
 
+PROBLEMS_FILE = Path("run-problems.txt")
+
+
+def health(stats: Counter, attempted: int) -> list[str]:
+    """Reasons this run shouldn't count as a success.
+
+    A broken scraper looks exactly like a quiet day for fares — no deals,
+    no email — so anything that smells like breakage fails the job
+    instead, and the workflow mails about it.
+    """
+    problems = []
+    if stats["blocked"]:
+        problems.append("Google blocked the run, so it stopped early.")
+    if attempted and stats["scan_failed"] > attempted * 0.10:
+        problems.append(f"{stats['scan_failed']} of {attempted} route scans raised errors "
+                        "(Google may have changed its format; try bumping faster-flights).")
+    if attempted and stats["empty"] > attempted * 0.5:
+        problems.append(f"{stats['empty']} of {attempted} routes returned no fares at all.")
+    if stats["dives"] and stats["dive_failed"] > stats["dives"] * 0.5:
+        problems.append(f"{stats['dive_failed']} of {stats['dives']} deep dives raised errors.")
+    if stats["mail_failed"]:
+        problems.append("The deals email couldn't be sent (check the Resend key and domain).")
+    return problems
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true", help="no email, write preview.html")
@@ -75,19 +101,23 @@ def main() -> int:
     log.info("scanning %d of %d routes", len(targets), len(config.DESTINATIONS))
 
     # ---------------------------------------------------------- pass one
+    stats: Counter = Counter()
     candidates = []
     for code, city, region in targets:
         try:
             quotes = flights.scan(origin, code)
         except flights.Blocked:
             log.error("Google is blocking us — stopping the run early")
+            stats["blocked"] += 1
             break
         except Exception as exc:
             log.warning("scan failed for %s: %s", code, exc)
+            stats["scan_failed"] += 1
             continue
 
         if not quotes:
             log.info("%-4s no fares returned", code)
+            stats["empty"] += 1
             continue
 
         store.record_scan(origin, code, config.CURRENCY,
@@ -117,13 +147,16 @@ def main() -> int:
     found = []
     for code, city, region, hit, baseline, days, season in candidates:
         log.info("diving on %s around %s", code, hit.depart_date)
+        stats["dives"] += 1
         try:
             grid = flights.dive(origin, code, hit.depart_date)
         except flights.Blocked:
             log.error("blocked mid-dive — mailing what we have")
+            stats["blocked"] += 1
             break
         except Exception as exc:
             log.warning("dive failed for %s: %s", code, exc)
+            stats["dive_failed"] += 1
             continue
 
         if not grid:
@@ -165,10 +198,21 @@ def main() -> int:
         if mailer.send(subject, page, plain):
             for d in found:
                 store.mark_alerted(origin, d.dest, d.price)
+        else:
+            stats["mail_failed"] += 1
     else:
         log.info("nothing cleared the bar, staying quiet")
 
+    store.prune()
     store.close()
+
+    problems = health(stats, len(targets))
+    PROBLEMS_FILE.unlink(missing_ok=True)
+    if problems:
+        for p in problems:
+            log.error("unhealthy run: %s", p)
+        PROBLEMS_FILE.write_text("\n".join(problems), encoding="utf-8")
+        return 1
     return 0
 
 

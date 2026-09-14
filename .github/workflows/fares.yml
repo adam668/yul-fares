@@ -21,25 +21,37 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: write   # push price history to the data branch
+  actions: write    # re-enable this workflow so the schedule never lapses
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    # ~100 routes a day is roughly 90 minutes; the headroom covers slow
-    # days and a manual --all run.
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
 
       - run: pip install -r requirements.txt
 
+      # The runner is wiped after every job, so price history lives on the
+      # `data` branch as one commit that's replaced each run — the repo
+      # never accumulates a copy per day. If it can't be fetched, stop:
+      # starting from an empty database and saving it would wipe history.
+      - name: Restore price history
+        id: restore
+        run: |
+          git fetch --depth 1 origin data
+          git show FETCH_HEAD:prices.db > prices.db
+          echo "restored=true" >> "$GITHUB_OUTPUT"
+
       - name: Find fares
+        # Under the job limit, so the save and alert steps still get to run.
+        timeout-minutes: 200
         env:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
@@ -55,18 +67,31 @@ jobs:
           DB_PATH: prices.db
         run: python run.py --only "${{ inputs.only }}" ${{ inputs.all && '--all' || '' }}
 
-      # The runner is wiped after every job, so the price history has to
-      # live in the repo. Without this the baseline resets daily and
-      # nothing ever clears 40%. Runs even if the scan failed or timed
-      # out part-way, so a bad day doesn't throw away what it did collect.
+      # Runs even if the scan failed or timed out part-way, so a bad day
+      # doesn't throw away what it did collect.
       - name: Save price history
-        if: always()
+        if: always() && steps.restore.outputs.restored == 'true'
         run: |
-          [ -f prices.db ] || exit 0
           git config user.name  "fares-bot"
           git config user.email "fares-bot@users.noreply.github.com"
-          git add prices.db
-          git diff --staged --quiet && exit 0
-          git commit -m "prices $(date -u +%F)"
-          git pull --rebase
-          git push
+          blob=$(git hash-object -w prices.db)
+          tree=$(printf '100644 blob %s\tprices.db\n' "$blob" | git mktree)
+          commit=$(git commit-tree "$tree" -m "prices $(date -u +%F)")
+          git push --force origin "$commit:refs/heads/data"
+
+      # GitHub disables scheduled workflows after 60 days without repository
+      # activity. Re-enabling on every run resets that clock.
+      - name: Keep the schedule alive
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/fares.yml/enable"
+
+      - name: Email if the run failed
+        if: failure()
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          MAIL_FROM: ${{ vars.MAIL_FROM }}
+          ORIGIN: ${{ vars.ORIGIN || 'YUL' }}
+        run: python3 alert.py "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

@@ -34,6 +34,14 @@ CREATE TABLE IF NOT EXISTS route_day (
     PRIMARY KEY (seen_on, origin, dest)
 );
 
+CREATE TABLE IF NOT EXISTS route_low (
+    origin   TEXT NOT NULL,
+    dest     TEXT NOT NULL,
+    price    REAL NOT NULL,
+    seen_on  TEXT NOT NULL,
+    PRIMARY KEY (origin, dest)
+);
+
 CREATE TABLE IF NOT EXISTS alerted (
     origin     TEXT NOT NULL,
     dest       TEXT NOT NULL,
@@ -43,6 +51,12 @@ CREATE TABLE IF NOT EXISTS alerted (
     PRIMARY KEY (origin, dest, price)
 );
 """
+
+# How far back a baseline looks. Observations older than this (plus a
+# margin) are pruned; route_day and route_low keep the long view.
+BASELINE_DAYS = 60
+PRUNE_MARGIN_DAYS = 5
+DIVE_KEEP_DAYS = 7          # dive rows only ever matter for today's email
 
 # A seasonal baseline needs this many days of scans in its window before
 # it's trusted over the whole-year one.
@@ -65,6 +79,11 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         self._migrate()
+        if not self.db.execute("SELECT 1 FROM route_low LIMIT 1").fetchone():
+            # SQLite returns the seen_on of the MIN(price) row here.
+            self.db.execute(
+                "INSERT INTO route_low (origin, dest, price, seen_on) "
+                "SELECT origin, dest, MIN(price), seen_on FROM observation GROUP BY origin, dest")
         self.db.commit()
 
     def close(self) -> None:
@@ -124,8 +143,14 @@ class Store:
             "return_date, price, currency, kind) VALUES (?,?,?,?,?,?,?,?)",
             [(today, origin, dest, d, r, p, currency, kind) for d, r, p in quotes],
         )
+        prices = [p for _, _, p in quotes]
+        self.db.execute(
+            "INSERT INTO route_low (origin, dest, price, seen_on) VALUES (?,?,?,?) "
+            "ON CONFLICT(origin, dest) DO UPDATE SET price=excluded.price, "
+            "seen_on=excluded.seen_on WHERE excluded.price < route_low.price",
+            (origin, dest, min(prices), today),
+        )
         if kind == "scan":
-            prices = [p for _, _, p in quotes]
             self.db.execute(
                 "INSERT OR REPLACE INTO route_day (seen_on, origin, dest, median, low, samples) "
                 "VALUES (?,?,?,?,?,?)",
@@ -136,7 +161,7 @@ class Store:
     # ------------------------------------------------------------ reading
 
     def baseline(self, origin: str, dest: str, around: str | None = None,
-                 lookback_days: int = 60) -> Baseline:
+                 lookback_days: int = BASELINE_DAYS) -> Baseline:
         """What this route normally costs — for departures near `around`.
 
         The median of each day's median. Taking the median twice is the
@@ -178,13 +203,15 @@ class Store:
         return Baseline(statistics.median(medians), len(medians))
 
     def lowest_ever(self, origin: str, dest: str):
-        """Cheapest fare ever seen on the route, dives included."""
+        """Cheapest fare ever seen on the route, dives included: (price, seen_on).
+
+        Kept in its own table because observations are pruned.
+        """
         row = self.db.execute(
-            "SELECT MIN(price) AS m, COUNT(DISTINCT seen_on) AS n FROM observation "
-            "WHERE origin=? AND dest=?",
+            "SELECT price, seen_on FROM route_low WHERE origin=? AND dest=?",
             (origin, dest),
         ).fetchone()
-        return (row["m"], row["n"]) if row and row["m"] is not None else (None, 0)
+        return (row["price"], row["seen_on"]) if row else (None, None)
 
     def daily_lows(self, origin: str, dest: str, days: int = 90):
         since = (date.today() - timedelta(days=days)).isoformat()
@@ -194,6 +221,25 @@ class Store:
             (origin, dest, since),
         ).fetchall()
         return [(r["seen_on"], r["low"]) for r in rows]
+
+    # ------------------------------------------------------------ upkeep
+
+    def prune(self, today: date | None = None) -> None:
+        """Drop rows no baseline will read again, so prices.db stays small.
+
+        Unpruned, a year of 100 routes a day is ~60 MB. Baselines read 60
+        days of scans; dive rows are dead once the day's email is out;
+        route_day (one row per route per scan) and route_low keep the long
+        view for a few MB a decade.
+        """
+        today = today or date.today()
+        scans = (today - timedelta(days=BASELINE_DAYS + PRUNE_MARGIN_DAYS)).isoformat()
+        dives = (today - timedelta(days=DIVE_KEEP_DAYS)).isoformat()
+        self.db.execute("DELETE FROM observation WHERE seen_on < ?", (scans,))
+        self.db.execute("DELETE FROM observation WHERE kind='dive' AND seen_on < ?", (dives,))
+        self.db.execute("DELETE FROM alerted WHERE last_sent < ?", (scans,))
+        self.db.commit()
+        self.db.execute("VACUUM")
 
     # ------------------------------------------------------------ dedupe
 

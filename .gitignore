@@ -3,3 +3,5 @@ __pycache__/
 .env
 preview.html
 .venv/
+prices.db
+run-problems.txt
