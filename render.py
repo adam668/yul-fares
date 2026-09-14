@@ -163,11 +163,15 @@ def _timetable(deal: Deal) -> str:
 
 
 def _confidence(deal: Deal) -> str:
+    if deal.season:
+        scope = f"{deal.season} departures on this route"
+    else:
+        scope = "this route, all seasons mixed"
     if deal.history_days < 7:
-        note = (f"Baseline from {deal.history_days} day(s) of tracking — thin. "
+        note = (f"Baseline from {deal.history_days} day(s) of tracking {scope} — thin. "
                 f"Sanity-check this one against Google Flights before booking.")
     else:
-        note = f"Baseline from {deal.history_days} days of tracking on this route."
+        note = f"Baseline from {deal.history_days} days of tracking {scope}."
     return f"""
 <tr><td style="padding:10px 24px 26px 24px;font-family:{SANS};font-size:12px;
     line-height:17px;color:{SLATE};border-bottom:3px solid {INK};">{note}</td></tr>"""

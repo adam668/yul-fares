@@ -49,6 +49,14 @@ Taking the median twice is deliberate. One anomalously cheap sampled date
 can't drag the reference down, and neither can one anomalous day of scanning.
 A route has to actually get cheaper, and stay cheaper, to move it.
 
+**The baseline is seasonal.** A fare is compared only against scanned fares
+departing within a month either side of it, so an off-season $699 to
+Huatulco isn't mistaken for 46% off a year that includes the winter-sun
+peak. A season needs five days of scans before it's used; until then the
+whole-year baseline stands in, and the email says which one it used.
+Deep-dive grids are stored but never feed the baseline — they cluster
+around a fare that was already cheap.
+
 **This means day one is the weak day.** With no history, the baseline falls
 back to today's own scan, and a real sale depresses that scan slightly — so
 the first week will both miss things and occasionally overstate a discount.

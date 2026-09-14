@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import statistics
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -56,6 +57,7 @@ class Deal:
     history_days: int
     tiers: list[Tier]
     best: Quote
+    season: str = ""                # "Nov–Jan" if the baseline is seasonal
     lowest_ever: float | None = None
     is_record: bool = False
     sparkline: list[tuple[str, float]] = field(default_factory=list)
@@ -76,25 +78,30 @@ class Deal:
 # ---------------------------------------------------------------- scanning
 
 
-def candidate(quotes: list[Quote], baseline: float | None) -> Quote | None:
+def candidate(quotes: list[Quote],
+              baseline_for: Callable[[Quote], float | None]) -> tuple[Quote, float] | None:
     """Does this route deserve the expensive deep dive?
+
+    Each sampled date is measured against its own season's baseline, and
+    the one furthest below it wins — which is not necessarily the cheapest
+    date, since an off-season fare can be low without being discounted.
 
     Deliberately looser than the real bar. The scan samples eleven dates
     out of three hundred, so the cheapest date it happened to hit is
     usually a little above the true floor for that sale. Screening at the
     full 40% here would throw away routes the dive would have qualified.
     """
-    if not quotes:
+    affordable = [q for q in quotes if q.price <= config.MAX_PRICE]
+    if not affordable:
         return None
-    ref = baseline or statistics.median(q.price for q in quotes)
-    cheapest = min(quotes, key=lambda q: q.price)
+    fallback = scan_baseline(quotes)
+    scored = [(q, baseline_for(q) or fallback) for q in affordable]
+    best, ref = min(scored, key=lambda s: s[0].price / s[1])
 
     screen = config.DISCOUNT_FLOOR * 0.7
-    if cheapest.price > ref * (1 - screen):
+    if best.price > ref * (1 - screen):
         return None
-    if cheapest.price > config.MAX_PRICE:
-        return None
-    return cheapest
+    return best, ref
 
 
 def scan_baseline(quotes: list[Quote]) -> float | None:
@@ -144,7 +151,7 @@ def _tiers(quotes: list[Quote], *, spread: float = 0.08, limit: int = 4) -> list
 
 
 def build(dest: str, city: str, region: str, quotes: list[Quote],
-          baseline: float, history_days: int) -> Deal | None:
+          baseline: float, history_days: int, season: str = "") -> Deal | None:
     """Apply the real bar and assemble the deal, or return nothing."""
     if not quotes:
         return None
@@ -165,7 +172,7 @@ def build(dest: str, city: str, region: str, quotes: list[Quote],
     return Deal(
         dest=dest, city=city, region=region,
         price=price, baseline=baseline, history_days=history_days,
-        tiers=tiers, best=cheapest,
+        tiers=tiers, best=cheapest, season=season,
     )
 
 

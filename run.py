@@ -93,16 +93,21 @@ def main() -> int:
         store.record_scan(origin, code, config.CURRENCY,
                           [(q.depart_date, q.return_date, q.price) for q in quotes])
 
-        baseline, days = store.baseline(origin, code)
-        baseline = baseline or D.scan_baseline(quotes)
-        hit = D.candidate(quotes, baseline)
+        refs = {q.depart_date: store.baseline(origin, code, around=q.depart_date)
+                for q in quotes}
+        hit = D.candidate(quotes, lambda q: refs[q.depart_date].price)
 
-        log.info("%-4s low %6.0f  baseline %6.0f  (%d days)%s",
-                 code, min(q.price for q in quotes), baseline or 0, days,
+        cheapest = min(quotes, key=lambda q: q.price)
+        shown_quote, shown_ref = hit or (cheapest, refs[cheapest.depart_date].price)
+        ref = refs[shown_quote.depart_date]
+        log.info("%-4s %s %6.0f  baseline %6.0f  (%d days%s)%s",
+                 code, "hit" if hit else "low", shown_quote.price, shown_ref or 0,
+                 ref.days, f", {ref.season}" if ref.season else "",
                  "  <- candidate" if hit else "")
 
         if hit:
-            candidates.append((code, city, region, hit, baseline, days))
+            quote, baseline = hit
+            candidates.append((code, city, region, quote, baseline, ref.days, ref.season))
 
     # Dive on the deepest discounts first; the budget is the scarce thing.
     candidates.sort(key=lambda c: c[3].price / c[4])
@@ -110,7 +115,7 @@ def main() -> int:
 
     # ---------------------------------------------------------- pass two
     found = []
-    for code, city, region, hit, baseline, days in candidates:
+    for code, city, region, hit, baseline, days, season in candidates:
         log.info("diving on %s around %s", code, hit.depart_date)
         try:
             grid = flights.dive(origin, code, hit.depart_date)
@@ -125,9 +130,10 @@ def main() -> int:
             continue
 
         store.record_scan(origin, code, config.CURRENCY,
-                          [(q.depart_date, q.return_date, q.price) for q in grid])
+                          [(q.depart_date, q.return_date, q.price) for q in grid],
+                          kind="dive")
 
-        deal = D.build(code, city, region, grid, baseline, days)
+        deal = D.build(code, city, region, grid, baseline, days, season)
         if not deal:
             log.info("%s didn't clear the bar on the full grid", code)
             continue
