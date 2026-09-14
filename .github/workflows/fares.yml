@@ -1,0 +1,72 @@
+name: fares
+
+on:
+  schedule:
+    # 11:10 UTC = 07:10 in Montreal during EDT, 06:10 during EST.
+    # GitHub queues scheduled jobs, so expect it a few minutes late.
+    - cron: "10 11 * * *"
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "Limit to these IATA codes, comma separated"
+        required: false
+        default: ""
+      all:
+        description: "Scan every route today instead of today's share"
+        type: boolean
+        default: false
+
+concurrency:
+  group: fares
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    # ~100 routes a day is roughly 90 minutes; the headroom covers slow
+    # days and a manual --all run.
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Find fares
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          MAIL_FROM: ${{ vars.MAIL_FROM }}
+          ORIGIN: ${{ vars.ORIGIN || 'YUL' }}
+          CURRENCY: ${{ vars.CURRENCY || 'CAD' }}
+          DISCOUNT_FLOOR: ${{ vars.DISCOUNT_FLOOR || '0.40' }}
+          MIN_ABS_SAVING: ${{ vars.MIN_ABS_SAVING || '250' }}
+          MAX_PRICE: ${{ vars.MAX_PRICE || '1600' }}
+          MAX_DEEP_DIVES: ${{ vars.MAX_DEEP_DIVES || '7' }}
+          SCAN_EVERY_DAYS: ${{ vars.SCAN_EVERY_DAYS || '2' }}
+          SEND_WHEN_EMPTY: ${{ vars.SEND_WHEN_EMPTY || '0' }}
+          DB_PATH: prices.db
+        run: python run.py --only "${{ inputs.only }}" ${{ inputs.all && '--all' || '' }}
+
+      # The runner is wiped after every job, so the price history has to
+      # live in the repo. Without this the baseline resets daily and
+      # nothing ever clears 40%. Runs even if the scan failed or timed
+      # out part-way, so a bad day doesn't throw away what it did collect.
+      - name: Save price history
+        if: always()
+        run: |
+          [ -f prices.db ] || exit 0
+          git config user.name  "fares-bot"
+          git config user.email "fares-bot@users.noreply.github.com"
+          git add prices.db
+          git diff --staged --quiet && exit 0
+          git commit -m "prices $(date -u +%F)"
+          git pull --rebase
+          git push
