@@ -33,6 +33,9 @@ def send(subject: str, html: str, text: str) -> bool:
         headers={
             "Authorization": f"Bearer {config.RESEND_API_KEY}",
             "Content-Type": "application/json",
+            # Cloudflare in front of Resend rejects urllib's default
+            # "Python-urllib/3.x" agent with a bare 403 (error 1010).
+            "User-Agent": "yul-fares/1.0",
         },
         method="POST",
     )
