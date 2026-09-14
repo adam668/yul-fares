@@ -71,9 +71,9 @@ def _sleep() -> None:
 
 
 def _stamp(sdt) -> str:
-    # Google drops trailing zeros: 16:00 arrives as [16], midnight as [].
-    y, m, d = (list(sdt.date or []) + [0, 0, 0])[:3]
-    hh, mm = (list(sdt.time or []) + [0, 0])[:2]
+    # Google drops zeros: 16:00 arrives as [16], 00:30 as [None, 30], midnight as [].
+    y, m, d = [v or 0 for v in (list(sdt.date or []) + [0, 0, 0])[:3]]
+    hh, mm = [v or 0 for v in (list(sdt.time or []) + [0, 0])[:2]]
     return f"{y:04d}-{m:02d}-{d:02d} {hh:02d}:{mm:02d}"
 
 
