@@ -115,7 +115,10 @@ or the deals email bouncing. A failed run emails you (via `alert.py`) with
 the reason and a link to the log. One of those is usually Google being
 flaky; two days running means something needs fixing. The workflow also
 re-enables itself every run, so GitHub's 60-days-of-inactivity rule never
-switches the schedule off.
+switches the schedule off. GitHub's scheduler is best-effort and
+occasionally never fires, so there are backup crons at 13:10 and 16:10 UTC;
+a small gate job makes them exit immediately if a run already started that
+day.
 
 The real fragility is the schema: Google changes its internal format
 occasionally and the library needs a release to catch up. When prices stop
